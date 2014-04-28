@@ -48,6 +48,8 @@ def parse_args():
       help="Whether to include Shark")
   parser.add_option("-r", "--redshift", action="store_true", default=False,
       help="Whether to include Redshift")
+  parser.add_option("-g", "--greenplum", action="store_true", default=False,
+      help="Whether to include Greenplum")
 
   parser.add_option("-a", "--impala-host",
       help="Hostname of Impala state store node")
@@ -55,17 +57,21 @@ def parse_args():
       help="Hostname of Shark master node")
   parser.add_option("-c", "--redshift-host",
       help="Hostname of Redshift ODBC endpoint")
+  parser.add_option("-i", "--greenplum-master",
+      help="Hostname of Greenplum master")
 
   parser.add_option("-x", "--impala-identity-file",
       help="SSH private key file to use for logging into Impala node")
   parser.add_option("-y", "--shark-identity-file",
       help="SSH private key file to use for logging into Shark node")
-  parser.add_option("-u", "--redshift-username",
-      help="Username for Redshift ODBC connection")
-  parser.add_option("-p", "--redshift-password",
-      help="Password for Redshift ODBC connection")
-  parser.add_option("-e", "--redshift-database",
-      help="Database to use in Redshift")
+  parser.add_option("-z", "--greenplum-identity-file",
+      help="SSH private key file to use for logging into Greenplum node")
+  parser.add_option("-u", "--username",
+      help="Username for connection")
+  parser.add_option("-p", "--password",
+      help="Password for connection")
+  parser.add_option("-e", "--database",
+      help="Database to use in Redshift or Greenlum")
 
   parser.add_option("-n", "--scale-factor", type="int", default=5,
       help="Number of database nodes (dataset is scaled accordingly)")
@@ -83,7 +89,7 @@ def parse_args():
 
   (opts, args) = parser.parse_args()
 
-  if not (opts.impala or opts.shark or opts.redshift):
+  if not (opts.impala or opts.shark or opts.redshift or opts.greenplum):
     parser.print_help()
     sys.exit(1)
 
@@ -117,6 +123,16 @@ def parse_args():
     print >> stderr, \
         "Redshift requires host, username, password, db, and AWS credentials"
     sys.exit(1)
+
+  if opts.greenplum and (opts.greenplum_identity_file is None or
+                        opts.username is None or
+                        opts.password is None or
+                        opts.greenplum_master is None or
+                        opts.database is None): 
+    print >> stderr, \
+        "Greenplum requires host, username, password, db"
+    sys.exit(1)
+  
   
   return opts
 
@@ -343,6 +359,125 @@ def prepare_redshift_dataset(opts):
   print "Size of UserVisits table in Redshift:"
   query_and_print(cursor, "SELECT COUNT(*) from uservisits;")
 
+def prepare_greenplum_dataset(opts):
+
+  def ssh_greenplum(command):
+    ssh(opts.greenplum_master, "gpadmin", opts.greenplum_identity_file, command)
+
+  if not opts.skip_s3_import:
+    print "=== IMPORTING BENCHMARK FROM S3 ==="
+    try:
+      ssh_greenplum("mkdir -p /data/benchmark/data/rankings")
+      ssh_greenplum("mkdir -p /data/benchmark/data/uservisits")
+
+      ssh_greenplum(
+        "sudo aws s3 cp s3://big-data-benchmark/pavlo/%s/%s/rankings/ " \
+        "/data/benchmark/data/rankings/ --recursive" % (opts.file_format, opts.data_prefix))
+      ssh_greenplum(
+        "sudo aws s3 cp  s3://big-data-benchmark/pavlo/%s/%s/uservisits/ " \
+        "/data/benchmark/data/uservisits/ --recursive" % (opts.file_format, opts.data_prefix))
+    except Exception:
+      pass # Folder may already exist
+
+  def query_and_print(cursor, query):
+    cursor.execute(query)
+    for res in cursor:
+      print res
+  
+  def query_with_catch(cursor, query):
+    try: 
+      cursor.execute(query)
+    except pg8000.errors.InternalError as e:
+      print >> stderr, "Received error from pg8000: %s" % e
+      print >> stderr, "Attempting to continue..."
+  
+  conn = DBAPI.connect(
+    host = opts.greenplum_master,
+    database = opts.database,
+
+    user = opts.username,
+    password = opts.password,
+    port = 5432,
+    socket_timeout=60 * 45)
+  cursor = conn.cursor()
+
+  try:
+    cursor.execute("DROP TABLE rankings;")
+  except Exception:
+    pass
+
+  try:
+    cursor.execute("DROP TABLE uservisits;")
+  except Exception:
+    pass
+
+  try:
+    cursor.execute("DROP TABLE rankingsExternal;")
+  except Exception:
+    pass
+
+  try:
+    cursor.execute("DROP TABLE uservisitsExternal;")
+  except Exception:
+    pass
+
+  conn.commit()
+
+  create_rankings_q = "CREATE TABLE rankings (pageURL VARCHAR(300), "\
+      "pageRank INT, avgDuration INT);"
+  create_uservisits_q = "CREATE TABLE uservisits (sourceIP "\
+      "VARCHAR(116), destinationURL VARCHAR(100), visitDate DATE, adRevenue "\
+      "FLOAT, UserAgent VARCHAR(256), cCode CHAR(3), lCode CHAR(6), searchWord "\
+      "VARCHAR(32), duration INT);"
+
+  conn.commit()
+
+  print "Create rankings table in Greenplum..."
+  cursor.execute(create_rankings_q)
+  print "Create uservisits table in Greenplum..."
+  cursor.execute(create_uservisits_q)
+
+  conn.commit()
+
+  print "Starting gpfdist process"
+  ssh_greenplum(
+    'sudo su - gpadmin -l -c "gpfdist -d /data/benchmark/data -p 8081 &"')
+
+  create_rankings_external_q = "CREATE EXTERNAL TABLE rankingsExternal (pageURL VARCHAR(300), "\
+    "pageRank INT, avgDuration INT) "\
+    "location ('gpfdist://127.0.0.1:8081/rankings/*') format 'csv';"
+  create_uservisits_external_q = "CREATE EXTERNAL TABLE uservisitsExternal (sourceIP "\
+      "VARCHAR(116), destinationURL VARCHAR(100), visitDate DATE, adRevenue "\
+      "FLOAT, UserAgent VARCHAR(256), cCode CHAR(3), lCode CHAR(6), searchWord "\
+      "VARCHAR(32), duration INT) "\
+      "location ('gpfdist://127.0.0.1:8081/uservisits/*') format 'csv';"
+
+  print "Create rankings external table in Greenplum..."
+  cursor.execute(create_rankings_external_q)
+  print "Create uservisits external table in Greenplum..."
+  cursor.execute(create_uservisits_external_q)
+
+  conn.commit()
+
+  insert_rankings_external_into_rankings_q = "INSERT INTO rankings SELECT * FROM rankingsExternal;"
+  insert_uservisits_external_into_uservisits_q = "INSERT INTO uservisits SELECT * FROM uservisitsExternal;"
+
+  print "Inserting from external rankings file into rankings table..."
+  cursor.execute(insert_rankings_external_into_rankings_q)
+  conn.commit()
+
+  print "Inserting from external uservisits file into uservisits table..."
+  cursor.execute(insert_uservisits_external_into_uservisits_q)
+  conn.commit()
+
+  print "Size of Rankings table in Greenplum:"
+  query_and_print(cursor, "SELECT COUNT(*) from rankings;")
+
+  print "Size of UserVisits table in Greenplum:"
+  query_and_print(cursor, "SELECT COUNT(*) from uservisits;")
+
+  
+
 def print_percentiles(in_list):
   print "Got list %s" % in_list
   def get_pctl(lst, pctl):
@@ -363,6 +498,8 @@ def main():
     prepare_shark_dataset(opts)
   if opts.redshift:
     prepare_redshift_dataset(opts)
+  if opts.greenplum:
+    prepare_greenplum_dataset(opts)
 
 if __name__ == "__main__":
   main()

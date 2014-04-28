@@ -155,8 +155,10 @@ def parse_args():
       help="Whether to include Shark")
   parser.add_option("-r", "--redshift", action="store_true", default=False,
       help="Whether to include Redshift")
+  parser.add_option("-g", "--greenplum", action="store_true", default=False,
+      help="Whether to include Greenplum")
 
-  parser.add_option("-g", "--shark-no-cache", action="store_true", 
+  parser.add_option("--shark-no-cache", action="store_true", 
       default=False, help="Disable caching in Shark")
   parser.add_option("--impala-use-hive", action="store_true",
       default=False, help="Use Hive for query executio on Impala nodes") 
@@ -171,17 +173,19 @@ def parse_args():
       help="Hostname of Shark master node")
   parser.add_option("-c", "--redshift-host",
       help="Hostname of Redshift ODBC endpoint")
+  parser.add_option("-d", "--greenplum-master",
+      help="Hostname of Greenplum Master")
 
   parser.add_option("-x", "--impala-identity-file",
       help="SSH private key file to use for logging into Impala node")
   parser.add_option("-y", "--shark-identity-file",
       help="SSH private key file to use for logging into Shark node")
-  parser.add_option("-u", "--redshift-username",
-      help="Username for Redshift ODBC connection")
-  parser.add_option("-p", "--redshift-password",
-      help="Password for Redshift ODBC connection")
-  parser.add_option("-e", "--redshift-database",
-      help="Database to use in Redshift")
+  parser.add_option("-u", "--username",
+      help="Username for connection")
+  parser.add_option("-p", "--password",
+      help="Password for connection")
+  parser.add_option("-e", "--database",
+      help="Database to use")
   parser.add_option("--num-trials", type="int", default=10,
       help="Number of trials to run for this query")
 
@@ -191,7 +195,7 @@ def parse_args():
 
   (opts, args) = parser.parse_args()
 
-  if not (opts.impala or opts.shark or opts.redshift):
+  if not (opts.impala or opts.shark or opts.redshift or opts.greenplum):
     parser.print_help()
     sys.exit(1)
 
@@ -206,10 +210,18 @@ def parse_args():
         "Shark requires identity file and hostname"
     sys.exit(1)
   
-  if opts.redshift and (opts.redshift_username is None or
-                        opts.redshift_password is None or
+  if opts.redshift and (opts.username is None or
+                        opts.password is None or
                         opts.redshift_host is None or
-                        opts.redshift_database is None):
+                        opts.database is None):
+    print >> stderr, \
+        "Redshift requires host, username, password and db"
+    sys.exit(1)
+
+  if opts.greenplum and (opts.username is None or
+                        opts.password is None or
+                        opts.greenplum_master is None or
+                        opts.database is None):
     print >> stderr, \
         "Redshift requires host, username, password and db"
     sys.exit(1)
@@ -291,7 +303,7 @@ def run_shark_benchmark(opts):
     def convert_to_cached(query):
       return (make_output_cached(make_input_cached(query[0])), )
 
-    local_query_map = {k: convert_to_cached(v) for k, v in QUERY_MAP.items()}
+    #local_query_map = {k: convert_to_cached(v) for k, v in QUERY_MAP.items()}
 
     # Set up cached tables
     if '4' in opts.query_num:
@@ -449,12 +461,37 @@ def run_impala_benchmark(opts):
 def run_redshift_benchmark(opts):
   conn = DBAPI.connect(
     host = opts.redshift_host,
-    database = opts.redshift_database,
-    user = opts.redshift_username,
-    password = opts.redshift_password,
+    database = opts.database,
+    user = opts.username,
+    password = opts.password,
     port = 5439,
     socket_timeout=6000)
   print >> stderr, "Connecting to Redshift..."
+  cursor = conn.cursor()
+
+  print >> stderr, "Connection succeeded..."
+  times = []
+  # Clean up old table if still exists
+  try:
+    cursor.execute(CLEAN_QUERY)
+  except:
+    pass
+  for i in range(opts.num_trials):
+    t0 = time.time()
+    cursor.execute(QUERY_MAP[opts.query_num][2])
+    times.append(time.time() - t0)
+    cursor.execute(CLEAN_QUERY)
+  return times
+
+def run_greenplum_benchmark(opts):
+  conn = DBAPI.connect(
+    host = opts.greenplum_master,
+    database = opts.database,
+    user = opts.username,
+    password = opts.password,
+    port = 5432,
+    socket_timeout=6000)
+  print >> stderr, "Connecting to Greenplum..."
   cursor = conn.cursor()
 
   print >> stderr, "Connection succeeded..."
@@ -509,6 +546,8 @@ def main():
     results, contents = run_shark_benchmark(opts)
   if opts.redshift:
     results = run_redshift_benchmark(opts)
+  if opts.greenplum:
+    results = run_greenplum_benchmark(opts)
 
   if opts.impala:
     if opts.clear_buffer_cache:
@@ -521,6 +560,8 @@ def main():
     fname = "shark_mem"
   elif opts.redshift:
     fname = "redshift"
+  elif opts.greenplum:
+    fname = "greenplum"
 
   def prettylist(lst):
     return ",".join([str(k) for k in lst]) 
@@ -532,8 +573,8 @@ def main():
   print >> output, "Results: %s" % prettylist(results)
   print >> output, "Percentiles: %s" % get_percentiles(results)
   print >> output, "Best: %s"  % min(results)
-  if not opts.redshift:
-    print >> output, "Contents: \n%s" % str(prettylist(contents))
+  #if not opts.redshift or opts.greenplum:
+  #  print >> output, "Contents: \n%s" % str(prettylist(contents))
 
   print output.getvalue()
   print >> outfile, output.getvalue()

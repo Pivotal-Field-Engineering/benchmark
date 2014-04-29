@@ -470,8 +470,14 @@ def prepare_greenplum_dataset(opts):
   cursor.execute(insert_uservisits_external_into_uservisits_q)
   conn.commit()
 
+  print "Analyze Rankings table in Greenplum:"
+  query_and_print(cursor, "ANALYZE rankings;")
+
   print "Size of Rankings table in Greenplum:"
   query_and_print(cursor, "SELECT COUNT(*) from rankings;")
+
+  print "Analyze UserVisits table in Greenplum:"
+  query_and_print(cursor, "ANALYZE uservisits;")
 
   print "Size of UserVisits table in Greenplum:"
   query_and_print(cursor, "SELECT COUNT(*) from uservisits;")

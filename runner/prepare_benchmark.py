@@ -424,11 +424,11 @@ def prepare_greenplum_dataset(opts):
   conn.commit()
 
   create_rankings_q = "CREATE TABLE rankings (pageURL VARCHAR(300), "\
-      "pageRank INT, avgDuration INT);"
+      "pageRank INT, avgDuration INT)  WITH (APPENDONLY=TRUE, ORIENTATION=COLUMN);"
   create_uservisits_q = "CREATE TABLE uservisits (sourceIP "\
       "VARCHAR(116), destinationURL VARCHAR(100), visitDate DATE, adRevenue "\
       "FLOAT, UserAgent VARCHAR(256), cCode CHAR(3), lCode CHAR(6), searchWord "\
-      "VARCHAR(32), duration INT);"
+      "VARCHAR(32), duration INT)  WITH (APPENDONLY=TRUE, ORIENTATION=COLUMN);"
 
   conn.commit()
 
